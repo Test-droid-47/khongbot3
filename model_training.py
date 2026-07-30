@@ -108,7 +108,7 @@ print("🛠️ Engineering features...")
 df_feat = engineer_features(df_labeled)
 print(f"✅ Total rows after feature eng: {len(df_feat)}")
 
-exclude = ['open', 'high', 'low', 'close', 'long_label', 'short_label']
+exclude = ['open', 'high', 'low', 'close', 'long_label', 'short_label', 'timestamp']
 X = df_feat.drop(columns=[c for c in exclude if c in df_feat.columns])
 y_long = df_feat['long_label']
 y_short = df_feat['short_label']
