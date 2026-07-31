@@ -3,14 +3,16 @@
 
 """
 model_training.py
-- Splits data chronologically (80% train, 20% test).
-- Computes features ONLY on train set (dropping NaNs from warmup).
-- Trains models on train set features.
+- Chronological split (80% train, 20% test for backtest).
+- Features computed only on train set.
+- Trains Long & Short models.
+- Prints train metrics + feature importance + split dates.
 """
 
 import pandas as pd
 import numpy as np
 import xgboost as xgb
+from sklearn.metrics import classification_report, accuracy_score
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -26,10 +28,9 @@ MODEL_LONG = "xgboost_long.json"
 MODEL_SHORT = "xgboost_short.json"
 
 # ==========================================
-# FEATURE ENGINEERING FUNCTION (Backward-looking)
+# FEATURE ENGINEERING (same)
 # ==========================================
 def engineer_features(df):
-    """Expects df with columns: open, high, low, close (timestamp as index)"""
     df = df.copy()
     df['range'] = df['high'] - df['low'] + 1e-9
     df['close_position'] = (df['close'] - df['low']) / df['range']
@@ -60,32 +61,14 @@ def engineer_features(df):
     drop_cols = ['range', 'avg_range_20', 'tr', 'atr5', 'atr20',
                  'daily_high', 'daily_low', 'upper_wick', 'lower_wick']
     df = df.drop(columns=drop_cols)
-    df = df.dropna()   # drop first 24+ rows due to rolling windows
+    df = df.dropna()
     return df
 
 # ==========================================
-# 1. LOAD RAW DATA & SPLIT (Chronological)
+# TARGET CREATION
 # ==========================================
-print("📊 Loading data...")
-df_raw = pd.read_csv(CSV_FILE)
-df_raw.columns = [col.lower() for col in df_raw.columns]
-df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
-df_raw.set_index('timestamp', inplace=True)
-
-total_rows = len(df_raw)
-split_idx = int(total_rows * SPLIT_RATIO)
-
-train_raw = df_raw.iloc[:split_idx].copy()
-test_raw = df_raw.iloc[split_idx:].copy()
-print(f"📅 Train period: {train_raw.index[0]} to {train_raw.index[-1]}")
-print(f"📅 Test period : {test_raw.index[0]} to {test_raw.index[-1]}")
-
-# ==========================================
-# 2. CREATE TARGETS ON TRAIN (only)
-# ==========================================
-print("🔄 Creating targets on train data...")
 def create_targets(df):
-    labels_long, labels_short = [], []
+    long_labels, short_labels = [], []
     for i in range(len(df) - LOOKAHEAD):
         entry = df.iloc[i]['open']
         long_tp = entry * (1 + TP)
@@ -104,33 +87,52 @@ def create_targets(df):
             if short_win == 0 and low <= short_tp:
                 if df.iloc[i+1:i+j]['high'].max() < short_sl:
                     short_win = 1
-        labels_long.append(long_win)
-        labels_short.append(short_win)
-    return labels_long, labels_short
+        long_labels.append(long_win)
+        short_labels.append(short_win)
+    return long_labels, short_labels
 
+# ==========================================
+# 1. LOAD & SPLIT
+# ==========================================
+print("📊 Loading data...")
+df_raw = pd.read_csv(CSV_FILE)
+df_raw.columns = [col.lower() for col in df_raw.columns]
+df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
+df_raw.set_index('timestamp', inplace=True)
+
+total_rows = len(df_raw)
+split_idx = int(total_rows * SPLIT_RATIO)
+
+train_raw = df_raw.iloc[:split_idx].copy()
+test_raw = df_raw.iloc[split_idx:].copy()
+
+print(f"\n📅 TRAIN period : {train_raw.index[0].date()} to {train_raw.index[-1].date()} ({len(train_raw)} candles)")
+print(f"📅 TEST period  : {test_raw.index[0].date()} to {test_raw.index[-1].date()} ({len(test_raw)} candles)\n")
+
+# ==========================================
+# 2. TARGET & FEATURES ON TRAIN
+# ==========================================
+print("🔄 Creating targets on train data...")
 long_labels, short_labels = create_targets(train_raw)
 train_labeled = train_raw.iloc[:len(long_labels)].copy()
 train_labeled['long_label'] = long_labels
 train_labeled['short_label'] = short_labels
 
-# ==========================================
-# 3. FEATURE ENGINEERING ON TRAIN
-# ==========================================
 print("🛠️ Engineering features on train set...")
 train_feat = engineer_features(train_labeled)
 print(f"✅ Train rows after features: {len(train_feat)}")
 print(f"📈 Long train dist: {train_feat['long_label'].value_counts().to_dict()}")
-print(f"📈 Short train dist: {train_feat['short_label'].value_counts().to_dict()}")
+print(f"📈 Short train dist: {train_feat['short_label'].value_counts().to_dict()}\n")
 
 # ==========================================
-# 4. TRAIN MODELS
+# 3. TRAIN MODELS
 # ==========================================
 exclude = ['open', 'high', 'low', 'close', 'long_label', 'short_label']
 X_train = train_feat.drop(columns=[c for c in exclude if c in train_feat.columns])
 y_long = train_feat['long_label']
 y_short = train_feat['short_label']
 
-print("\n🤖 Training LONG model...")
+print("🤖 Training LONG model...")
 ratio_long = (y_long == 0).sum() / ((y_long == 1).sum() + 1e-9)
 model_long = xgb.XGBClassifier(
     n_estimators=200, max_depth=6, learning_rate=0.05,
@@ -141,7 +143,13 @@ model_long = xgb.XGBClassifier(
 )
 model_long.fit(X_train, y_long)
 model_long.save_model(MODEL_LONG)
+
+# --- Metrics on train ---
+y_pred_long = model_long.predict(X_train)
+acc_long = accuracy_score(y_long, y_pred_long)
 print(f"✅ Long model saved (scale_pos_weight={ratio_long:.2f})")
+print(f"📊 Long Train Accuracy : {acc_long*100:.2f}%")
+print("Classification Report (Long):\n", classification_report(y_long, y_pred_long, target_names=['Loss', 'Win']))
 
 print("\n🤖 Training SHORT model...")
 ratio_short = (y_short == 0).sum() / ((y_short == 1).sum() + 1e-9)
@@ -154,6 +162,22 @@ model_short = xgb.XGBClassifier(
 )
 model_short.fit(X_train, y_short)
 model_short.save_model(MODEL_SHORT)
-print(f"✅ Short model saved (scale_pos_weight={ratio_short:.2f})")
 
-print("\n✅ Training complete! Models ready for backtesting on unseen 20% data.")
+y_pred_short = model_short.predict(X_train)
+acc_short = accuracy_score(y_short, y_pred_short)
+print(f"✅ Short model saved (scale_pos_weight={ratio_short:.2f})")
+print(f"📊 Short Train Accuracy : {acc_short*100:.2f}%")
+print("Classification Report (Short):\n", classification_report(y_short, y_pred_short, target_names=['Loss', 'Win']))
+
+# ==========================================
+# 4. FEATURE IMPORTANCE
+# ==========================================
+print("\n🔑 Top 5 features (Long):")
+for i, f in enumerate(X_train.columns[:5]):
+    print(f"   {i+1}. {f}: {model_long.feature_importances_[i]:.4f}")
+
+print("\n🔑 Top 5 features (Short):")
+for i, f in enumerate(X_train.columns[:5]):
+    print(f"   {i+1}. {f}: {model_short.feature_importances_[i]:.4f}")
+
+print("\n✅ Training complete! Models are ready for backtesting on unseen 20% data.")
