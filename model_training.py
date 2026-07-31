@@ -3,8 +3,9 @@
 
 """
 model_training.py
-Trains dual XGBoost models (Long & Short) on OHLCV dataset.
-Saves xgboost_long.json and xgboost_short.json.
+- Splits data chronologically (80% train, 20% test).
+- Computes features ONLY on train set (dropping NaNs from warmup).
+- Trains models on train set features.
 """
 
 import pandas as pd
@@ -14,19 +15,21 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# CONFIGURATION
+# CONFIG
 # ==========================================
 CSV_FILE = "ohlcv.csv"
-TP = 0.003         # 0.3%
-SL = 0.0015        # 0.15%
+TP = 0.003
+SL = 0.0015
 LOOKAHEAD = 4
+SPLIT_RATIO = 0.8
 MODEL_LONG = "xgboost_long.json"
 MODEL_SHORT = "xgboost_short.json"
 
 # ==========================================
-# FEATURE ENGINEERING (COMMON)
+# FEATURE ENGINEERING FUNCTION (Backward-looking)
 # ==========================================
 def engineer_features(df):
+    """Expects df with columns: open, high, low, close (timestamp as index)"""
     df = df.copy()
     df['range'] = df['high'] - df['low'] + 1e-9
     df['close_position'] = (df['close'] - df['low']) / df['range']
@@ -57,68 +60,76 @@ def engineer_features(df):
     drop_cols = ['range', 'avg_range_20', 'tr', 'atr5', 'atr20',
                  'daily_high', 'daily_low', 'upper_wick', 'lower_wick']
     df = df.drop(columns=drop_cols)
-    df = df.dropna()
+    df = df.dropna()   # drop first 24+ rows due to rolling windows
     return df
 
 # ==========================================
-# 1. LOAD DATA & CREATE DUAL TARGETS
+# 1. LOAD RAW DATA & SPLIT (Chronological)
 # ==========================================
 print("📊 Loading data...")
 df_raw = pd.read_csv(CSV_FILE)
 df_raw.columns = [col.lower() for col in df_raw.columns]
+df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'])
+df_raw.set_index('timestamp', inplace=True)
 
-print("🔄 Creating targets for Long and Short models...")
-long_labels, short_labels = [], []
 total_rows = len(df_raw)
+split_idx = int(total_rows * SPLIT_RATIO)
 
-for i in range(total_rows - LOOKAHEAD):
-    entry = df_raw.loc[i, 'open']
-    long_tp = entry * (1 + TP)
-    long_sl = entry * (1 - SL)
-    short_tp = entry * (1 - TP)
-    short_sl = entry * (1 + SL)
-
-    long_win, short_win = 0, 0
-
-    for j in range(1, LOOKAHEAD + 1):
-        high = df_raw.loc[i + j, 'high']
-        low = df_raw.loc[i + j, 'low']
-
-        if long_win == 0 and high >= long_tp:
-            min_low = df_raw.loc[i+1:i+j, 'low'].min()
-            if min_low > long_sl:
-                long_win = 1
-
-        if short_win == 0 and low <= short_tp:
-            max_high = df_raw.loc[i+1:i+j, 'high'].max()
-            if max_high < short_sl:
-                short_win = 1
-
-    long_labels.append(long_win)
-    short_labels.append(short_win)
-
-df_labeled = df_raw.iloc[:len(long_labels)].copy()
-df_labeled['long_label'] = long_labels
-df_labeled['short_label'] = short_labels
+train_raw = df_raw.iloc[:split_idx].copy()
+test_raw = df_raw.iloc[split_idx:].copy()
+print(f"📅 Train period: {train_raw.index[0]} to {train_raw.index[-1]}")
+print(f"📅 Test period : {test_raw.index[0]} to {test_raw.index[-1]}")
 
 # ==========================================
-# 2. ENGINEER FEATURES
+# 2. CREATE TARGETS ON TRAIN (only)
 # ==========================================
-print("🛠️ Engineering features...")
-df_feat = engineer_features(df_labeled)
-print(f"✅ Total rows after feature eng: {len(df_feat)}")
+print("🔄 Creating targets on train data...")
+def create_targets(df):
+    labels_long, labels_short = [], []
+    for i in range(len(df) - LOOKAHEAD):
+        entry = df.iloc[i]['open']
+        long_tp = entry * (1 + TP)
+        long_sl = entry * (1 - SL)
+        short_tp = entry * (1 - TP)
+        short_sl = entry * (1 + SL)
 
-exclude = ['open', 'high', 'low', 'close', 'long_label', 'short_label', 'timestamp']
-X = df_feat.drop(columns=[c for c in exclude if c in df_feat.columns])
-y_long = df_feat['long_label']
-y_short = df_feat['short_label']
+        long_win, short_win = 0, 0
+        for j in range(1, LOOKAHEAD + 1):
+            high = df.iloc[i + j]['high']
+            low = df.iloc[i + j]['low']
 
-print(f"📈 Long  distribution: {y_long.value_counts().to_dict()}")
-print(f"📈 Short distribution: {y_short.value_counts().to_dict()}")
+            if long_win == 0 and high >= long_tp:
+                if df.iloc[i+1:i+j]['low'].min() > long_sl:
+                    long_win = 1
+            if short_win == 0 and low <= short_tp:
+                if df.iloc[i+1:i+j]['high'].max() < short_sl:
+                    short_win = 1
+        labels_long.append(long_win)
+        labels_short.append(short_win)
+    return labels_long, labels_short
+
+long_labels, short_labels = create_targets(train_raw)
+train_labeled = train_raw.iloc[:len(long_labels)].copy()
+train_labeled['long_label'] = long_labels
+train_labeled['short_label'] = short_labels
 
 # ==========================================
-# 3. TRAIN LONG MODEL
+# 3. FEATURE ENGINEERING ON TRAIN
 # ==========================================
+print("🛠️ Engineering features on train set...")
+train_feat = engineer_features(train_labeled)
+print(f"✅ Train rows after features: {len(train_feat)}")
+print(f"📈 Long train dist: {train_feat['long_label'].value_counts().to_dict()}")
+print(f"📈 Short train dist: {train_feat['short_label'].value_counts().to_dict()}")
+
+# ==========================================
+# 4. TRAIN MODELS
+# ==========================================
+exclude = ['open', 'high', 'low', 'close', 'long_label', 'short_label']
+X_train = train_feat.drop(columns=[c for c in exclude if c in train_feat.columns])
+y_long = train_feat['long_label']
+y_short = train_feat['short_label']
+
 print("\n🤖 Training LONG model...")
 ratio_long = (y_long == 0).sum() / ((y_long == 1).sum() + 1e-9)
 model_long = xgb.XGBClassifier(
@@ -128,13 +139,10 @@ model_long = xgb.XGBClassifier(
     scale_pos_weight=ratio_long,
     random_state=42, eval_metric='logloss'
 )
-model_long.fit(X, y_long)
+model_long.fit(X_train, y_long)
 model_long.save_model(MODEL_LONG)
-print(f"✅ Long model saved to {MODEL_LONG} (scale_pos_weight={ratio_long:.2f})")
+print(f"✅ Long model saved (scale_pos_weight={ratio_long:.2f})")
 
-# ==========================================
-# 4. TRAIN SHORT MODEL
-# ==========================================
 print("\n🤖 Training SHORT model...")
 ratio_short = (y_short == 0).sum() / ((y_short == 1).sum() + 1e-9)
 model_short = xgb.XGBClassifier(
@@ -144,19 +152,8 @@ model_short = xgb.XGBClassifier(
     scale_pos_weight=ratio_short,
     random_state=42, eval_metric='logloss'
 )
-model_short.fit(X, y_short)
+model_short.fit(X_train, y_short)
 model_short.save_model(MODEL_SHORT)
-print(f"✅ Short model saved to {MODEL_SHORT} (scale_pos_weight={ratio_short:.2f})")
+print(f"✅ Short model saved (scale_pos_weight={ratio_short:.2f})")
 
-# ==========================================
-# 5. FEATURE IMPORTANCE
-# ==========================================
-print("\n🔑 Top 5 features (Long):")
-for i, f in enumerate(X.columns[:5]):
-    print(f"   {i+1}. {f}: {model_long.feature_importances_[i]:.4f}")
-
-print("\n🔑 Top 5 features (Short):")
-for i, f in enumerate(X.columns[:5]):
-    print(f"   {i+1}. {f}: {model_short.feature_importances_[i]:.4f}")
-
-print("\n✅ Training complete! Models ready for backtesting and live trading.")
+print("\n✅ Training complete! Models ready for backtesting on unseen 20% data.")
