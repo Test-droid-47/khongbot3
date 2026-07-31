@@ -90,7 +90,7 @@ print("🛠️ Engineering features...")
 df_feat = engineer_features(df_raw)
 print(f"✅ Backtest rows: {len(df_feat)}")
 
-exclude = ['open', 'high', 'low', 'close']
+exclude = ['open', 'high', 'low', 'close', 'timestamp']
 X = df_feat.drop(columns=[c for c in exclude if c in df_feat.columns])
 
 # ==========================================
