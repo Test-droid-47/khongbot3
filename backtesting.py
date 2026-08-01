@@ -24,7 +24,7 @@ LOOKAHEAD = 4
 SPLIT_RATIO = 0.8
 
 MODEL_PATH = "xgboost_high_confidence.json"
-CONFIDENCE_THRESHOLD = 0.75   # Adjust after seeing backtest results
+CONFIDENCE_THRESHOLD = 0.50   # Adjust after seeing backtest results
 
 CAPITAL = 100
 LEVERAGE = 10
