@@ -56,7 +56,7 @@ def engineer_features(df):
     volume = df['volume'].astype(float)
     
     # --- Hurst with fallback ---
-    hurst_vals = close.rolling(100).apply(lambda x: hurst(x.values), raw=True)
+    hurst_vals = close.rolling(100).apply(lambda x: hurst(x), raw=True)
     df['hurst_exp'] = hurst_vals.fillna(0.5)   # random walk assumption
     
     # --- Other features (no fill, will be dropped if NaN) ---
