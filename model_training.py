@@ -48,7 +48,7 @@ def engineer_features(df):
     df = df.copy()
     close = df['close']; high = df['high']; low = df['low']; volume = df['volume']
     
-    df['hurst_exp'] = close.rolling(100).apply(lambda x: hurst(x.values), raw=True)
+    df['hurst_exp'] = close.rolling(100).apply(lambda x: hurst(x), raw=True)
     df['vol_aggression'] = volume * (high - low) / close
     vwap = (volume * close).rolling(50).sum() / volume.rolling(50).sum()
     df['vwap_ema_spread'] = vwap - close.ewm(span=20).mean()
