@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-model_training.py - HIGH CONFIDENCE TRADING
-Target: TP (0.3%) before SL (0.15%) in next 1-4 bars
-Only predicts probability (confidence) – trade only when > 0.75
+model_training.py - High Confidence Trading
+- Fixed Hurst exponent (NaN filled with 0.5)
+- All other NaNs dropped (lookback warmup)
+- Trains binary classifier for TP before SL
 """
 
 import pandas as pd
@@ -18,57 +19,72 @@ warnings.filterwarnings('ignore')
 # CONFIG
 # ==========================================
 CSV_FILE = "ohlcv.csv"
-TP = 0.003
-SL = 0.0015
-LOOKAHEAD = 4
-SPLIT_RATIO = 0.8
+TP = 0.003          # 0.3% Take Profit
+SL = 0.0015         # 0.15% Stop Loss
+LOOKAHEAD = 4       # Scan next 4 candles
+SPLIT_RATIO = 0.8   # 80% train, 20% test
 MODEL_PATH = "xgboost_high_confidence.json"
 
 # ==========================================
-# FEATURE ENGINEERING (same as before)
+# FEATURE ENGINEERING (with NaN handling)
 # ==========================================
 def hurst(series):
-    lags = min(100, len(series))
-    if lags < 2:
+    """Compute Hurst exponent on a numpy array. Returns NaN if fails."""
+    if len(series) < 10:
         return np.nan
+    max_lag = min(100, len(series)//2)
+    if max_lag < 2:
+        return np.nan
+    lags = np.arange(2, max_lag)
     tau = []
-    lagvec = np.arange(1, lags)
-    for lag in lagvec:
+    for lag in lags:
         pp = np.subtract(series[lag:], series[:-lag])
         tau.append(np.std(pp))
     if len(tau) < 2:
         return np.nan
     try:
-        poly = np.polyfit(np.log(lagvec[:len(tau)]), np.log(tau), 1)
+        poly = np.polyfit(np.log(lags[:len(tau)]), np.log(tau), 1)
         return poly[0] * 2.0
     except:
         return np.nan
 
 def engineer_features(df):
     df = df.copy()
-    close = df['close']; high = df['high']; low = df['low']; volume = df['volume']
+    close = df['close'].astype(float)
+    high = df['high'].astype(float)
+    low = df['low'].astype(float)
+    volume = df['volume'].astype(float)
     
-    df['hurst_exp'] = close.rolling(100).apply(lambda x: hurst(x), raw=True)
+    # --- Hurst with fallback ---
+    hurst_vals = close.rolling(100).apply(lambda x: hurst(x.values), raw=True)
+    df['hurst_exp'] = hurst_vals.fillna(0.5)   # random walk assumption
+    
+    # --- Other features (no fill, will be dropped if NaN) ---
     df['vol_aggression'] = volume * (high - low) / close
     vwap = (volume * close).rolling(50).sum() / volume.rolling(50).sum()
     df['vwap_ema_spread'] = vwap - close.ewm(span=20).mean()
     df['price_accel'] = close - 2 * close.shift(1) + close.shift(2)
+    
+    # True Range for ATR
     tr = np.maximum(high - low, 
                     np.maximum(abs(high - close.shift(1)),
                                abs(low - close.shift(1))))
     atr = tr.rolling(14).mean()
     df['natr'] = atr / close
+    
     ret = close.pct_change()
     df['amihud_illiq'] = abs(ret) / (volume + 1e-9) * 1e9
+    
     high_24 = high.rolling(24).max()
     low_24 = low.rolling(24).min()
     df['stop_buy_dist'] = (high_24 - low_24) / close
     
+    # --- Drop all rows with any remaining NaN (lookback warmup) ---
     df = df.dropna()
     return df
 
 # ==========================================
-# TARGET CREATION: TP before SL (no direction)
+# TARGET CREATION (TP before SL)
 # ==========================================
 def create_target(df):
     labels = []
@@ -83,10 +99,8 @@ def create_target(df):
             high = df.iloc[idx]['high']
             low = df.iloc[idx]['low']
             
-            # SL hit first -> loss
             if low <= sl:
                 break
-            # TP hit first -> win
             if high >= tp:
                 win = 1
                 break
@@ -119,30 +133,37 @@ print(f"🔍 Labels before FE: {pd.Series(train_labels).value_counts().to_dict()
 train_labeled = train_raw.iloc[:len(train_labels)].copy()
 train_labeled['label'] = train_labels
 
-print("🛠️ Engineering features...")
+print("🛠️ Engineering features on train set...")
 train_feat = engineer_features(train_labeled)
 print(f"✅ Train rows after features: {len(train_feat)}")
 print(f"📈 Label distribution: {train_feat['label'].value_counts().to_dict()}\n")
+
+if len(train_feat) == 0:
+    print("❌ No training data after feature engineering. Check your data or adjust lookback windows.")
+    exit(1)
 
 exclude = ['open', 'high', 'low', 'close', 'label']
 X_train = train_feat.drop(columns=[c for c in exclude if c in train_feat.columns])
 y_train = train_feat['label']
 
-# ==========================================
-# TRAIN MODEL (Binary Classification)
-# ==========================================
 print("🤖 Training XGBoost...")
 model = xgb.XGBClassifier(
-    n_estimators=100, max_depth=4, learning_rate=0.03,
-    subsample=0.6, colsample_bytree=0.6,
-    reg_alpha=1.0, reg_lambda=2.0, min_child_weight=5,
-    objective='binary:logistic', scale_pos_weight=1.0,
-    random_state=42, eval_metric='logloss'
+    n_estimators=100,
+    max_depth=4,
+    learning_rate=0.03,
+    subsample=0.6,
+    colsample_bytree=0.6,
+    reg_alpha=1.0,
+    reg_lambda=2.0,
+    min_child_weight=5,
+    objective='binary:logistic',
+    scale_pos_weight=1.0,
+    random_state=42,
+    eval_metric='logloss'
 )
 model.fit(X_train, y_train)
 model.save_model(MODEL_PATH)
 
-# --- Evaluation ---
 y_pred = model.predict(X_train)
 y_proba = model.predict_proba(X_train)[:, 1]
 acc = accuracy_score(y_train, y_pred)
