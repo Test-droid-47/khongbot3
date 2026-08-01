@@ -2,10 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-model_training.py - New Features + Fixed Target
-- Uses 7 new robust features (no lookahead)
-- Correct target (entry at i+1 open, SL first)
-- Chronological split, no leakage
+model_training.py - Robust version with debug prints and error handling
 """
 
 import pandas as pd
@@ -30,44 +27,32 @@ MODEL_SHORT = "xgboost_short.json"
 # FEATURE ENGINEERING (New Set)
 # ==========================================
 def engineer_features(df):
-    """
-    Fast, vectorized feature engineering for the 7 Sniper Features.
-    """
     df = df.copy()
-    close = df['close']
-    high = df['high']
-    low = df['low']
-    volume = df['volume']
+    close = df['close']; high = df['high']; low = df['low']; volume = df['volume']
     
-    # 1. Fast Vectorized Hurst Exponent Proxy (Efficiency / Rescaled Range)
-    # Uses log returns variance ratio for instant vector calculation
-    lags = 20
-    tau = np.sqrt((close - close.shift(lags))**2)
-    std_single = close.diff().abs().rolling(lags).sum() + 1e-9
-    df['hurst_exp'] = np.log(tau / std_single + 1e-9) / np.log(lags)
+    def hurst(series, lags=100):
+        if len(series) < lags:
+            return np.nan
+        tau = []
+        lagvec = np.arange(1, lags)
+        for lag in lagvec:
+            pp = np.subtract(series[lag:], series[:-lag])
+            tau.append(np.std(pp))
+        poly = np.polyfit(np.log(lagvec), np.log(tau), 1)
+        return poly[0] * 2.0
     
-    # 2. Volume Aggression
-    df['vol_aggression'] = volume * (high - low) / (close + 1e-9)
-    
-    # 3. VWAP - EMA Spread
-    vwap = (volume * close).rolling(50).sum() / (volume.rolling(50).sum() + 1e-9)
+    df['hurst_exp'] = close.rolling(100).apply(lambda x: hurst(x.values), raw=True)
+    df['vol_aggression'] = volume * (high - low) / close
+    vwap = (volume * close).rolling(50).sum() / volume.rolling(50).sum()
     df['vwap_ema_spread'] = vwap - close.ewm(span=20).mean()
-    
-    # 4. Price Acceleration
     df['price_accel'] = close - 2 * close.shift(1) + close.shift(2)
-    
-    # 5. Normalized ATR (NATR)
     tr = np.maximum(high - low, 
                     np.maximum(abs(high - close.shift(1)),
                                abs(low - close.shift(1))))
     atr = tr.rolling(14).mean()
     df['natr'] = atr / close
-    
-    # 6. Amihud Illiquidity
     ret = close.pct_change()
-    df['amihud_illiq'] = (abs(ret) / (volume + 1e-9)) * 1e9
-    
-    # 7. Stop Buy Distance (24-period high/low spread relative to close)
+    df['amihud_illiq'] = abs(ret) / (volume + 1e-9) * 1e9
     high_24 = high.rolling(24).max()
     low_24 = low.rolling(24).min()
     df['stop_buy_dist'] = (high_24 - low_24) / close
@@ -75,9 +60,8 @@ def engineer_features(df):
     df = df.dropna()
     return df
 
-
 # ==========================================
-# TARGET CREATION (Corrected)
+# TARGET CREATION (Corrected with debug)
 # ==========================================
 def create_targets(df):
     long_labels, short_labels = [], []
@@ -94,7 +78,6 @@ def create_targets(df):
             high = df.iloc[idx]['high']
             low = df.iloc[idx]['low']
 
-            # Long: SL first
             if long_win == 0:
                 if low <= long_sl:
                     long_win = 0
@@ -103,7 +86,6 @@ def create_targets(df):
                     long_win = 1
                     break
 
-            # Short: SL first
             if short_win == 0:
                 if high >= short_sl:
                     short_win = 0
@@ -136,6 +118,11 @@ print(f"📅 TEST period  : {test_raw.index[0].date()} to {test_raw.index[-1].da
 
 print("🔄 Creating targets on train data...")
 long_labels, short_labels = create_targets(train_raw)
+
+# --- DEBUG: print target distribution before feature engineering ---
+print(f"🔍 Long labels before FE: {pd.Series(long_labels).value_counts().to_dict()}")
+print(f"🔍 Short labels before FE: {pd.Series(short_labels).value_counts().to_dict()}")
+
 train_labeled = train_raw.iloc[:len(long_labels)].copy()
 train_labeled['long_label'] = long_labels
 train_labeled['short_label'] = short_labels
@@ -151,6 +138,12 @@ X_train = train_feat.drop(columns=[c for c in exclude if c in train_feat.columns
 y_long = train_feat['long_label']
 y_short = train_feat['short_label']
 
+# --- Handle case where one class is missing ---
+if len(y_long.unique()) < 2:
+    print("⚠️ Long training data has only one class! Model will not learn. Check data.")
+if len(y_short.unique()) < 2:
+    print("⚠️ Short training data has only one class! Model will not learn. Check data.")
+
 print("🤖 Training LONG model...")
 model_long = xgb.XGBClassifier(
     n_estimators=80, max_depth=3, learning_rate=0.02,
@@ -165,7 +158,11 @@ model_long.save_model(MODEL_LONG)
 y_pred_long = model_long.predict(X_train)
 print(f"✅ Long model saved")
 print(f"📊 Long Train Accuracy : {accuracy_score(y_long, y_pred_long)*100:.2f}%")
-print(classification_report(y_long, y_pred_long, target_names=['Loss', 'Win']))
+# Only print classification report if both classes present
+if len(y_long.unique()) == 2:
+    print(classification_report(y_long, y_pred_long, target_names=['Loss', 'Win']))
+else:
+    print("⚠️ Skipping classification report for Long (only one class).")
 
 print("\n🤖 Training SHORT model...")
 model_short = xgb.XGBClassifier(
@@ -181,7 +178,10 @@ model_short.save_model(MODEL_SHORT)
 y_pred_short = model_short.predict(X_train)
 print(f"✅ Short model saved")
 print(f"📊 Short Train Accuracy : {accuracy_score(y_short, y_pred_short)*100:.2f}%")
-print(classification_report(y_short, y_pred_short, target_names=['Loss', 'Win']))
+if len(y_short.unique()) == 2:
+    print(classification_report(y_short, y_pred_short, target_names=['Loss', 'Win']))
+else:
+    print("⚠️ Skipping classification report for Short (only one class).")
 
 print("\n🔑 Top 5 features (Long):")
 for i, f in enumerate(X_train.columns[:5]):
