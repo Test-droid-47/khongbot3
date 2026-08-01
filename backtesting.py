@@ -60,7 +60,7 @@ def engineer_features(df):
     low = df['low'].astype(float)
     volume = df['volume'].astype(float)
     
-    hurst_vals = close.rolling(100).apply(lambda x: hurst(x.values), raw=True)
+    hurst_vals = close.rolling(100).apply(lambda x: hurst(x), raw=True)
     df['hurst_exp'] = hurst_vals.fillna(0.5)
     
     df['vol_aggression'] = volume * (high - low) / close
@@ -107,7 +107,7 @@ if len(test_feat) == 0:
     print("❌ No test data after feature engineering. Check your data.")
     exit(1)
 
-exclude = ['open', 'high', 'low', 'close']
+exclude = ['open', 'high', 'low', 'close', 'volume', 'fear_greed']
 X_test = test_feat.drop(columns=[c for c in exclude if c in test_feat.columns])
 df_test = test_feat
 
