@@ -142,7 +142,7 @@ if len(train_feat) == 0:
     print("❌ No training data after feature engineering. Check your data or adjust lookback windows.")
     exit(1)
 
-exclude = ['open', 'high', 'low', 'close', 'label']
+exclude = ['open', 'high', 'low', 'close', 'label', 'volume', 'fear_greed']
 X_train = train_feat.drop(columns=[c for c in exclude if c in train_feat.columns])
 y_train = train_feat['label']
 
