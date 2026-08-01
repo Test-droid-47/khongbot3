@@ -109,7 +109,7 @@ model_short.load_model(MODEL_SHORT)
 # ==========================================
 # 4. BACKTEST SIMULATION
 # ==========================================
-exclude = ['open', 'high', 'low', 'close']
+exclude = ['open', 'high', 'low', 'close', 'fear_greed', 'volume']
 X_test = test_feat.drop(columns=[c for c in exclude if c in test_feat.columns])
 df_test = test_feat
 
