@@ -127,7 +127,7 @@ print(f"📈 Short train dist: {train_feat['short_label'].value_counts().to_dict
 # ==========================================
 # 3. TRAIN MODELS
 # ==========================================
-exclude = ['open', 'high', 'low', 'close', 'long_label', 'short_label']
+exclude = ['open', 'high', 'low', 'close', 'long_label', 'short_label', 'fear_greed', 'volume']
 X_train = train_feat.drop(columns=[c for c in exclude if c in train_feat.columns])
 y_long = train_feat['long_label']
 y_short = train_feat['short_label']
@@ -135,8 +135,8 @@ y_short = train_feat['short_label']
 print("🤖 Training LONG model...")
 ratio_long = (y_long == 0).sum() / ((y_long == 1).sum() + 1e-9)
 model_long = xgb.XGBClassifier(
-    n_estimators=200, max_depth=6, learning_rate=0.05,
-    subsample=0.8, colsample_bytree=0.8,
+    n_estimators=100, max_depth=4, learning_rate=0.03,
+    subsample=0.6, colsample_bytree=0.6,
     objective='binary:logistic',
     scale_pos_weight=ratio_long,
     random_state=42, eval_metric='logloss'
@@ -154,8 +154,8 @@ print("Classification Report (Long):\n", classification_report(y_long, y_pred_lo
 print("\n🤖 Training SHORT model...")
 ratio_short = (y_short == 0).sum() / ((y_short == 1).sum() + 1e-9)
 model_short = xgb.XGBClassifier(
-    n_estimators=200, max_depth=6, learning_rate=0.05,
-    subsample=0.8, colsample_bytree=0.8,
+    n_estimators=100, max_depth=4, learning_rate=0.03,
+    subsample=0.6, colsample_bytree=0.6,
     objective='binary:logistic',
     scale_pos_weight=ratio_short,
     random_state=42, eval_metric='logloss'
