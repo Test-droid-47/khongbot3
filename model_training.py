@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-model_training_dual.py - Final Version
+model_training_dual.py - Final Version with Dataframe Export
 Trains Long & Short models.
 Excludes OHLC, volume, fear_greed, timestamp.
 Prints: Accuracy, AUC, Confusion Matrix, Feature Importance.
+Saves first 1000 rows of training features+labels to 'training_sample.csv'.
 """
 
 import pandas as pd
@@ -146,14 +147,20 @@ train_feat = engineer_features(train_labeled)
 print(f"✅ Train rows: {len(train_feat)}")
 
 # ==========================================
-# PERMANENT EXCLUDE LIST (OHLC, Volume, FearGreed, Timestamp)
+# PERMANENT EXCLUDE LIST
 # ==========================================
 exclude = ['open', 'high', 'low', 'close', 'long_label', 'short_label',
-           'volume', 'fear_greed', 'timestamp']  # added these
+           'volume', 'fear_greed', 'timestamp']
 
 X_train = train_feat.drop(columns=[c for c in exclude if c in train_feat.columns])
 y_long = train_feat['long_label']
 y_short = train_feat['short_label']
+
+# ---- NEW: SAVE TRAINING DATAFRAME SAMPLE (first 1000 rows) ----
+sample_df = train_feat.head(1000).copy()
+sample_df.to_csv("training_sample.csv", index=True)  # index is timestamp
+print("✅ Saved first 1000 rows of training data (features + labels) to 'training_sample.csv'")
+print("   Columns: timestamp (index), features, long_label, short_label")
 
 print(f"✅ Final feature columns: {list(X_train.columns)}")
 
