@@ -59,7 +59,7 @@ def engineer_features(df):
     low = df['low'].astype(float)
     volume = df['volume'].astype(float)
 
-    hurst_vals = close.rolling(100).apply(lambda x: hurst(x.values), raw=True)
+    hurst_vals = close.rolling(100).apply(lambda x: hurst(x), raw=True)
     df['hurst_exp'] = hurst_vals.fillna(0.5)
 
     df['vol_aggression'] = volume * (high - low) / close
