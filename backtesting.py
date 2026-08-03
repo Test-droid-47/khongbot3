@@ -97,7 +97,7 @@ print("🛠️ Engineering features...")
 test_feat = engineer_features(test_raw)
 print(f"✅ Test rows: {len(test_feat)}")
 
-exclude = ['open', 'high', 'low', 'close']
+exclude = ['open', 'high', 'low', 'close', 'volume', 'fear_greed']
 X_test = test_feat.drop(columns=[c for c in exclude if c in test_feat.columns])
 df_test = test_feat
 
