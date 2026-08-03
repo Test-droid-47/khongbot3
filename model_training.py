@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-model_training_dual.py - Final Version with Dataframe Export
-Trains Long & Short models.
-Excludes OHLC, volume, fear_greed, timestamp.
-Prints: Accuracy, AUC, Confusion Matrix, Feature Importance.
-Saves first 1000 rows of training features+labels to 'training_sample.csv'.
+model_training_dual.py - Final with Data Preprocessing Fixes
+- Drops constant hurst_exp (or any constant column)
+- Log1p transform on amihud_illiq
+- Caps vol_aggression at 99th percentile
+- Excludes OHLC, volume, fear_greed, timestamp
+- Saves training sample (first 1000 rows) for inspection
 """
 
 import pandas as pd
@@ -28,27 +29,8 @@ MODEL_LONG = "xgboost_long.json"
 MODEL_SHORT = "xgboost_short.json"
 
 # ==========================================
-# FEATURES (same for both)
+# FEATURE ENGINEERING (with preprocessing fixes)
 # ==========================================
-def hurst(series):
-    if len(series) < 10:
-        return np.nan
-    max_lag = min(100, len(series)//2)
-    if max_lag < 2:
-        return np.nan
-    lags = np.arange(2, max_lag)
-    tau = []
-    for lag in lags:
-        pp = np.subtract(series[lag:], series[:-lag])
-        tau.append(np.std(pp))
-    if len(tau) < 2:
-        return np.nan
-    try:
-        poly = np.polyfit(np.log(lags[:len(tau)]), np.log(tau), 1)
-        return poly[0] * 2.0
-    except:
-        return np.nan
-
 def engineer_features(df):
     df = df.copy()
     close = df['close'].astype(float)
@@ -56,9 +38,31 @@ def engineer_features(df):
     low = df['low'].astype(float)
     volume = df['volume'].astype(float)
 
+    # ---- 1. COMPUTE FEATURES ----
+    # Hurst exponent (will check constant later)
+    def hurst(series):
+        if len(series) < 10:
+            return np.nan
+        max_lag = min(100, len(series)//2)
+        if max_lag < 2:
+            return np.nan
+        lags = np.arange(2, max_lag)
+        tau = []
+        for lag in lags:
+            pp = np.subtract(series[lag:], series[:-lag])
+            tau.append(np.std(pp))
+        if len(tau) < 2:
+            return np.nan
+        try:
+            poly = np.polyfit(np.log(lags[:len(tau)]), np.log(tau), 1)
+            return poly[0] * 2.0
+        except:
+            return np.nan
+
     hurst_vals = close.rolling(100).apply(lambda x: hurst(x), raw=True)
     df['hurst_exp'] = hurst_vals.fillna(0.5)
 
+    # Other features
     df['vol_aggression'] = volume * (high - low) / close
     vwap = (volume * close).rolling(50).sum() / volume.rolling(50).sum()
     df['vwap_ema_spread'] = vwap - close.ewm(span=20).mean()
@@ -74,11 +78,27 @@ def engineer_features(df):
     low_24 = low.rolling(24).min()
     df['stop_buy_dist'] = (high_24 - low_24) / close
 
+    # ---- 2. PREPROCESSING FIXES ----
+    # Fix 1: Drop constant columns (e.g., hurst_exp if all 0.5)
+    constant_cols = [col for col in df.columns if df[col].nunique() == 1]
+    if constant_cols:
+        df.drop(columns=constant_cols, inplace=True)
+        print(f"   Dropped constant columns: {constant_cols}")
+
+    # Fix 2: Log transform amihud_illiq to handle heavy tails
+    if 'amihud_illiq' in df.columns:
+        df['amihud_illiq'] = np.log1p(df['amihud_illiq'])
+
+    # Fix 3: Cap vol_aggression at 99th percentile to reduce outlier influence
+    if 'vol_aggression' in df.columns:
+        p99 = df['vol_aggression'].quantile(0.99)
+        df['vol_aggression'] = df['vol_aggression'].clip(upper=p99)
+
     df = df.dropna()
     return df
 
 # ==========================================
-# TARGETS (Long and Short)
+# TARGET CREATION (Long & Short)
 # ==========================================
 def create_targets(df):
     long_labels, short_labels = [], []
@@ -89,7 +109,6 @@ def create_targets(df):
         short_tp = entry * (1 - TP)
         short_sl = entry * (1 + SL)
 
-        # Long
         long_win = 0
         for j in range(1, LOOKAHEAD + 1):
             idx = i + j
@@ -101,7 +120,6 @@ def create_targets(df):
                 long_win = 1
                 break
 
-        # Short
         short_win = 0
         for j in range(1, LOOKAHEAD + 1):
             idx = i + j
@@ -142,26 +160,24 @@ train_labeled = train_raw.iloc[:len(long_labels)].copy()
 train_labeled['long_label'] = long_labels
 train_labeled['short_label'] = short_labels
 
-print("🛠️ Engineering features...")
+print("🛠️ Engineering features (with preprocessing)...")
 train_feat = engineer_features(train_labeled)
-print(f"✅ Train rows: {len(train_feat)}")
+print(f"✅ Train rows after features: {len(train_feat)}")
 
 # ==========================================
 # PERMANENT EXCLUDE LIST
 # ==========================================
 exclude = ['open', 'high', 'low', 'close', 'long_label', 'short_label',
-           'volume', 'fear_greed', 'timestamp']
+           'volume', 'timestamp']
 
 X_train = train_feat.drop(columns=[c for c in exclude if c in train_feat.columns])
 y_long = train_feat['long_label']
 y_short = train_feat['short_label']
 
-# ---- NEW: SAVE TRAINING DATAFRAME SAMPLE (first 1000 rows) ----
+# ---- SAVE TRAINING DATAFRAME SAMPLE (first 1000 rows) ----
 sample_df = train_feat.head(1000).copy()
 sample_df.to_csv("training_sample.csv", index=True)  # index is timestamp
 print("✅ Saved first 1000 rows of training data (features + labels) to 'training_sample.csv'")
-print("   Columns: timestamp (index), features, long_label, short_label")
-
 print(f"✅ Final feature columns: {list(X_train.columns)}")
 
 # ---------- LONG ----------
@@ -179,7 +195,7 @@ if y_long.nunique() > 1:
     model_long.save_model(MODEL_LONG)
     y_pred = model_long.predict(X_train)
     y_proba = model_long.predict_proba(X_train)[:, 1]
-    
+
     print(f"✅ Long saved.")
     print(f"📊 Long Accuracy: {accuracy_score(y_long, y_pred)*100:.2f}%")
     print(f"📊 Long AUC: {roc_auc_score(y_long, y_proba):.4f}")
@@ -187,7 +203,7 @@ if y_long.nunique() > 1:
     print(confusion_matrix(y_long, y_pred))
     print("📊 Classification Report:")
     print(classification_report(y_long, y_pred, target_names=['Loss', 'Win']))
-    
+
     print("\n🔑 Top 10 Features (Long):")
     imp = model_long.feature_importances_
     for i, f in sorted(zip(imp, X_train.columns), reverse=True)[:10]:
@@ -208,7 +224,7 @@ if y_short.nunique() > 1:
     model_short.save_model(MODEL_SHORT)
     y_pred = model_short.predict(X_train)
     y_proba = model_short.predict_proba(X_train)[:, 1]
-    
+
     print(f"✅ Short saved.")
     print(f"📊 Short Accuracy: {accuracy_score(y_short, y_pred)*100:.2f}%")
     print(f"📊 Short AUC: {roc_auc_score(y_short, y_proba):.4f}")
@@ -216,7 +232,7 @@ if y_short.nunique() > 1:
     print(confusion_matrix(y_short, y_pred))
     print("📊 Classification Report:")
     print(classification_report(y_short, y_pred, target_names=['Loss', 'Win']))
-    
+
     print("\n🔑 Top 10 Features (Short):")
     imp = model_short.feature_importances_
     for i, f in sorted(zip(imp, X_train.columns), reverse=True)[:10]:
