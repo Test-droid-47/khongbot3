@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-backtest_dual.py - Long & Short backtest with confidence threshold.
+backtest_dual.py - Final Version
+Uses Long & Short models. Excludes OHLC, volume, fear_greed, timestamp.
 """
 
 import pandas as pd
@@ -97,7 +98,12 @@ print("🛠️ Engineering features...")
 test_feat = engineer_features(test_raw)
 print(f"✅ Test rows: {len(test_feat)}")
 
-exclude = ['open', 'high', 'low', 'close', 'volume', 'fear_greed']
+# ==========================================
+# PERMANENT EXCLUDE LIST (same as training)
+# ==========================================
+exclude = ['open', 'high', 'low', 'close', 'long_label', 'short_label',
+           'volume', 'fear_greed', 'timestamp']  # added these
+
 X_test = test_feat.drop(columns=[c for c in exclude if c in test_feat.columns])
 df_test = test_feat
 
