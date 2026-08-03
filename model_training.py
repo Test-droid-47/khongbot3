@@ -2,13 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-model_training_dual.py - Trains Long & Short with imbalance handling.
+model_training_dual.py - Final Version
+Trains Long & Short models.
+Excludes OHLC, volume, fear_greed, timestamp.
+Prints: Accuracy, AUC, Confusion Matrix, Feature Importance.
 """
 
 import pandas as pd
 import numpy as np
 import xgboost as xgb
-from sklearn.metrics import classification_report, accuracy_score
+from sklearn.metrics import classification_report, accuracy_score, roc_auc_score, confusion_matrix
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -142,12 +145,19 @@ print("🛠️ Engineering features...")
 train_feat = engineer_features(train_labeled)
 print(f"✅ Train rows: {len(train_feat)}")
 
-exclude = ['open', 'high', 'low', 'close', 'long_label', 'short_label']
+# ==========================================
+# PERMANENT EXCLUDE LIST (OHLC, Volume, FearGreed, Timestamp)
+# ==========================================
+exclude = ['open', 'high', 'low', 'close', 'long_label', 'short_label',
+           'volume', 'fear_greed', 'timestamp']  # added these
+
 X_train = train_feat.drop(columns=[c for c in exclude if c in train_feat.columns])
 y_long = train_feat['long_label']
 y_short = train_feat['short_label']
 
-# ---- TRAIN LONG ----
+print(f"✅ Final feature columns: {list(X_train.columns)}")
+
+# ---------- LONG ----------
 if y_long.nunique() > 1:
     ratio_long = (y_long == 0).sum() / ((y_long == 1).sum() + 1e-9)
     print(f"\n🤖 Training LONG (scale_pos_weight={ratio_long:.2f})...")
@@ -161,10 +171,22 @@ if y_long.nunique() > 1:
     model_long.fit(X_train, y_long)
     model_long.save_model(MODEL_LONG)
     y_pred = model_long.predict(X_train)
-    print(f"✅ Long saved. Accuracy: {accuracy_score(y_long, y_pred)*100:.2f}%")
+    y_proba = model_long.predict_proba(X_train)[:, 1]
+    
+    print(f"✅ Long saved.")
+    print(f"📊 Long Accuracy: {accuracy_score(y_long, y_pred)*100:.2f}%")
+    print(f"📊 Long AUC: {roc_auc_score(y_long, y_proba):.4f}")
+    print("📊 Confusion Matrix:")
+    print(confusion_matrix(y_long, y_pred))
+    print("📊 Classification Report:")
     print(classification_report(y_long, y_pred, target_names=['Loss', 'Win']))
+    
+    print("\n🔑 Top 10 Features (Long):")
+    imp = model_long.feature_importances_
+    for i, f in sorted(zip(imp, X_train.columns), reverse=True)[:10]:
+        print(f"   {f}: {i:.4f}")
 
-# ---- TRAIN SHORT ----
+# ---------- SHORT ----------
 if y_short.nunique() > 1:
     ratio_short = (y_short == 0).sum() / ((y_short == 1).sum() + 1e-9)
     print(f"\n🤖 Training SHORT (scale_pos_weight={ratio_short:.2f})...")
@@ -178,7 +200,19 @@ if y_short.nunique() > 1:
     model_short.fit(X_train, y_short)
     model_short.save_model(MODEL_SHORT)
     y_pred = model_short.predict(X_train)
-    print(f"✅ Short saved. Accuracy: {accuracy_score(y_short, y_pred)*100:.2f}%")
+    y_proba = model_short.predict_proba(X_train)[:, 1]
+    
+    print(f"✅ Short saved.")
+    print(f"📊 Short Accuracy: {accuracy_score(y_short, y_pred)*100:.2f}%")
+    print(f"📊 Short AUC: {roc_auc_score(y_short, y_proba):.4f}")
+    print("📊 Confusion Matrix:")
+    print(confusion_matrix(y_short, y_pred))
+    print("📊 Classification Report:")
     print(classification_report(y_short, y_pred, target_names=['Loss', 'Win']))
+    
+    print("\n🔑 Top 10 Features (Short):")
+    imp = model_short.feature_importances_
+    for i, f in sorted(zip(imp, X_train.columns), reverse=True)[:10]:
+        print(f"   {f}: {i:.4f}")
 
 print("\n✅ Training done. Now run `backtest_dual.py`")
