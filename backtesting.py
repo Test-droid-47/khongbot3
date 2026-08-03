@@ -24,7 +24,7 @@ SPLIT_RATIO = 0.8
 MODEL_LONG = "xgboost_long.json"
 MODEL_SHORT = "xgboost_short.json"
 
-CONFIDENCE_THRESHOLD = 0.70   # start here – tune later
+CONFIDENCE_THRESHOLD = 0.80   # start here – tune later
 
 CAPITAL = 100
 LEVERAGE = 10
