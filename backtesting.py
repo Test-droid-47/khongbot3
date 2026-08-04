@@ -15,7 +15,7 @@ warnings.filterwarnings('ignore')
 # CONFIG
 # ==========================================
 CSV_FILE = "ohlcv.csv"
-TP = 0.003
+TP = 0.005
 SL = 0.003
 LOOKAHEAD = 12
 SPLIT_RATIO = 0.8
