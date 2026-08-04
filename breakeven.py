@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-BTC/USDT 1H RULE-BASED STRATEGY (KAMA + Breakeven) - Softer Entry
-- Multiplier reduced to 0.3
-- Volatility filter (ATR > 0.5 * ATR_MA) to skip dead markets
-- TP = 0.30%, SL = 0.45%, Breakeven at 0.12%
+BTC/USDT 1H EMA CROSSOVER + BREAKEVEN
+- Entry: EMA5 crosses above EMA20 (Long) / below (Short)
+- TP = 0.3%, SL = 0.45% (wider)
+- Breakeven at +0.12%
+- Simpler = more trades
 """
 
 import pandas as pd
@@ -14,34 +15,18 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# CONFIG (softer entry)
+# CONFIG
 # ==========================================
 CSV_FILE = "ohlcv.csv"
-TP = 0.003                      # 0.30%
-SL_INITIAL = 0.0045             # 0.45%
-BREAKEVEN_TRIGGER = 0.0012      # 0.12%
+TP = 0.003
+SL_INITIAL = 0.0045
+BREAKEVEN_TRIGGER = 0.0012
 LOOKAHEAD = 12
 
 CAPITAL = 100
 LEVERAGE = 10
 SLIPPAGE = 0.0005
 FEE = 0.0007
-
-# Entry parameters
-ATR_MULTIPLIER = 0.3            # <-- lowered from 0.5
-MIN_VOLATILITY_RATIO = 0.5      # ATR must be > 0.5 * ATR_MA(50)
-
-# ==========================================
-# KAUFMAN'S ADAPTIVE MOVING AVERAGE
-# ==========================================
-def kama(close, n=20):
-    er = abs(close - close.shift(n)) / (abs(close.diff()).rolling(n).sum() + 1e-9)
-    sc = (er * (2.0/(2.0+1.0) - 2.0/(30.0+1.0)) + 2.0/(30.0+1.0)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return pd.Series(kama, index=close.index)
 
 # ==========================================
 # LOAD DATA
@@ -59,31 +44,16 @@ print(f"📅 Period: {df.index.min().date()} to {df.index.max().date()}")
 # INDICATORS
 # ==========================================
 close = df['close']
-high = df['high']
-low = df['low']
 
-df['kama'] = kama(close, n=20)
+df['ema5'] = close.ewm(span=5).mean()
+df['ema20'] = close.ewm(span=20).mean()
 
-tr = np.maximum(high - low,
-                np.maximum(abs(high - close.shift(1)),
-                           abs(low - close.shift(1))))
-df['atr'] = tr.rolling(14).mean()
-df['atr_ma'] = df['atr'].rolling(50).mean()
-
-# Volatility filter: avoid very quiet periods
-df['vol_ok'] = df['atr'] > (MIN_VOLATILITY_RATIO * df['atr_ma'])
-
-# Entry signals: cross KAMA + ATR*multiplier AND volatility OK
-df['long_signal'] = (close > df['kama'] + df['atr'] * ATR_MULTIPLIER) & \
-                    (close.shift(1) <= df['kama'].shift(1) + df['atr'].shift(1) * ATR_MULTIPLIER) & \
-                    df['vol_ok']
-
-df['short_signal'] = (close < df['kama'] - df['atr'] * ATR_MULTIPLIER) & \
-                     (close.shift(1) >= df['kama'].shift(1) - df['atr'].shift(1) * ATR_MULTIPLIER) & \
-                     df['vol_ok']
+# Signals: crossover
+df['long_signal'] = (df['ema5'] > df['ema20']) & (df['ema5'].shift(1) <= df['ema20'].shift(1))
+df['short_signal'] = (df['ema5'] < df['ema20']) & (df['ema5'].shift(1) >= df['ema20'].shift(1))
 
 # ==========================================
-# BACKTEST SIMULATION (with Breakeven)
+# BACKTEST
 # ==========================================
 print("💻 Simulating trades...")
 trades = []
@@ -177,15 +147,12 @@ for i in range(max_index):
         'Breakeven_Activated': breakeven_activated
     })
 
-# ==========================================
-# REPORT
-# ==========================================
 if len(trades) == 0:
-    print("❌ Still no trades. Try lowering ATR_MULTIPLIER to 0.2 or removing volatility filter.")
+    print("❌ No trades on EMA crossover. Check data.")
     exit(0)
 
 df_trades = pd.DataFrame(trades)
-df_trades.to_csv("btc_1h_breakeven_trades.csv", index=False)
+df_trades.to_csv("btc_1h_ema_trades.csv", index=False)
 
 total_trades = len(df_trades)
 wins = len(df_trades[df_trades['Result'] == 'Win'])
@@ -199,11 +166,10 @@ gross_losses = abs(df_trades[df_trades['Net_PnL'] < 0]['Net_PnL'].sum())
 profit_factor = gross_wins / gross_losses if gross_losses > 0 else np.inf
 
 print("\n" + "="*70)
-print("📊 BTC 1H BREAKEVEN (SOFTER) BACKTEST")
+print("📊 BTC 1H EMA CROSSOVER + BREAKEVEN")
 print("="*70)
 print(f"📅 Period: {df.index[0].date()} to {df.index[-1].date()}")
 print(f"🎯 TP: {TP*100:.2f}% | SL: {SL_INITIAL*100:.2f}% | BE: {BREAKEVEN_TRIGGER*100:.2f}%")
-print(f"🎯 Entry multiplier: {ATR_MULTIPLIER} | Vol filter: {MIN_VOLATILITY_RATIO}")
 print(f"💵 Initial Capital: ${CAPITAL}")
 print(f"📈 Final Capital  : ${final_capital:.2f}")
 print(f"📈 Total Return   : {total_return:.2f}%")
@@ -227,4 +193,4 @@ print(f"🔹 Short trades: {shorts} (Win rate: {short_wins/max(1,shorts)*100:.2f
 be_activated = df_trades['Breakeven_Activated'].sum()
 print(f"🔹 Breakeven activated on {be_activated} trades")
 print("="*70)
-print("💾 Trade log saved to 'btc_1h_breakeven_trades.csv'")
+print("💾 Trade log saved to 'btc_1h_ema_trades.csv'")
