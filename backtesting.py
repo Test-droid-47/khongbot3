@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-backtest_dual.py - Top 1 Signal Backtest
-- Scans the entire test set, collects all potential signals.
-- Selects the SINGLE best signal (highest confidence between Long/Short).
-- Enters that single trade.
-- Uses SL = 0.15% and TP = 0.3%.
+backtest_dual.py - Hourly High‑Confidence Simulation
+Scans every hour (candle by candle) and enters a trade only if:
+- No position is already open
+- The max confidence (Long/Short) >= CONFIDENCE_THRESHOLD
+- Direction is chosen based on higher confidence
+- TP = 0.3%, SL = 0.15%, 10x leverage, fees & slippage
 """
 
 import pandas as pd
@@ -27,13 +28,15 @@ SPLIT_RATIO = 0.8
 MODEL_LONG = "xgboost_long.json"
 MODEL_SHORT = "xgboost_short.json"
 
+CONFIDENCE_THRESHOLD = 0.70  # Only trade when model is ≥75% sure
+
 CAPITAL = 100
 LEVERAGE = 10
 SLIPPAGE = 0.0005
 FEE = 0.0007
 
 # ==========================================
-# FEATURES (Same as training)
+# FEATURES (same as training)
 # ==========================================
 def engineer_features(df):
     df = df.copy()
@@ -109,7 +112,7 @@ print("🛠️ Engineering features...")
 test_feat = engineer_features(test_raw)
 print(f"✅ Test rows: {len(test_feat)}")
 
-exclude = ['open', 'high', 'low', 'close', 'volume', 'timestamp']
+exclude = ['open', 'high', 'low', 'close', 'volume',  'timestamp']
 X_test = test_feat.drop(columns=[c for c in exclude if c in test_feat.columns])
 df_test = test_feat
 
@@ -119,110 +122,154 @@ model_short = xgb.XGBClassifier()
 model_long.load_model(MODEL_LONG)
 model_short.load_model(MODEL_SHORT)
 
-# ==========================================
-# COLLECT ALL SIGNALS (No Threshold)
-# ==========================================
-print("💻 Scanning for the TOP 1 signal...")
-signals = []
+print(f"💻 Scanning hourly with threshold = {CONFIDENCE_THRESHOLD*100:.0f}%...")
+trades = []
+capital_curve = [CAPITAL]
 max_index = len(df_test) - LOOKAHEAD - 1
+in_trade_until = -1  # index until which we are locked in a trade
 
 for i in range(max_index):
+    # Skip if we're currently in a trade
+    if i < in_trade_until:
+        capital_curve.append(capital_curve[-1])
+        continue
+
     features = X_test.iloc[i:i+1]
     conf_long = model_long.predict_proba(features)[0][1]
     conf_short = model_short.predict_proba(features)[0][1]
-    
-    # Choose direction based on higher confidence (no threshold)
+
+    # Choose direction with higher confidence
     if conf_long >= conf_short:
+        conf = conf_long
         direction = 'Long'
-        confidence = conf_long
     else:
+        conf = conf_short
         direction = 'Short'
-        confidence = conf_short
-    
-    signals.append({
-        'index': i,
-        'direction': direction,
-        'confidence': confidence,
-        'entry_time': df_test.index[i+1]
-    })
 
-# Sort by confidence descending and pick the TOP 1
-signals_sorted = sorted(signals, key=lambda x: x['confidence'], reverse=True)
-top_signal = signals_sorted[0]
+    # Only trade if confidence meets threshold
+    if conf < CONFIDENCE_THRESHOLD:
+        capital_curve.append(capital_curve[-1])
+        continue
 
-print(f"🏆 Top Signal: {top_signal['direction']} with confidence {top_signal['confidence']*100:.2f}%")
-print(f"   Entry Time: {top_signal['entry_time']}")
-
-# ==========================================
-# EXECUTE THE TOP 1 TRADE
-# ==========================================
-i = top_signal['index']
-direction = top_signal['direction']
-confidence = top_signal['confidence']
-
-# Entry at next candle's open (i+1)
-entry_price = df_test.iloc[i+1]['open']
-if direction == 'Long':
-    tp_price = entry_price * (1 + TP)
-    sl_price = entry_price * (1 - SL)
-else:
-    tp_price = entry_price * (1 - TP)
-    sl_price = entry_price * (1 + SL)
-
-exit_price, exit_time, result = None, 0, 'No Exit'
-for j in range(1, LOOKAHEAD + 1):
-    idx = i + j
-    if idx >= len(df_test):
-        break
-    high = df_test.iloc[idx]['high']
-    low = df_test.iloc[idx]['low']
-
+    # --- ENTER TRADE ---
+    entry_price = df_test.iloc[i+1]['open']
     if direction == 'Long':
-        if low <= sl_price:
-            exit_price, exit_time, result = sl_price, j, 'Loss'
-            break
-        if high >= tp_price:
-            exit_price, exit_time, result = tp_price, j, 'Win'
-            break
+        tp_price = entry_price * (1 + TP)
+        sl_price = entry_price * (1 - SL)
     else:
-        if high >= sl_price:
-            exit_price, exit_time, result = sl_price, j, 'Loss'
-            break
-        if low <= tp_price:
-            exit_price, exit_time, result = tp_price, j, 'Win'
-            break
+        tp_price = entry_price * (1 - TP)
+        sl_price = entry_price * (1 + SL)
 
-if exit_price is None:
-    exit_idx = i + LOOKAHEAD
-    if exit_idx < len(df_test):
-        exit_price = df_test.iloc[exit_idx]['close']
+    exit_price, exit_time, result = None, 0, 'No Exit'
+    for j in range(1, LOOKAHEAD + 1):
+        idx = i + j
+        if idx >= len(df_test):
+            break
+        high = df_test.iloc[idx]['high']
+        low = df_test.iloc[idx]['low']
+
+        if direction == 'Long':
+            if low <= sl_price:
+                exit_price, exit_time, result = sl_price, j, 'Loss'
+                break
+            if high >= tp_price:
+                exit_price, exit_time, result = tp_price, j, 'Win'
+                break
+        else:
+            if high >= sl_price:
+                exit_price, exit_time, result = sl_price, j, 'Loss'
+                break
+            if low <= tp_price:
+                exit_price, exit_time, result = tp_price, j, 'Win'
+                break
+
+    if exit_price is None:
+        exit_idx = i + LOOKAHEAD
+        if exit_idx < len(df_test):
+            exit_price = df_test.iloc[exit_idx]['close']
+        else:
+            exit_price = entry_price
+        exit_time = LOOKAHEAD
+        result = 'No Exit'
     else:
-        exit_price = entry_price
-    exit_time = LOOKAHEAD
-    result = 'No Exit'
-else:
-    exit_idx = i + exit_time
+        exit_idx = i + exit_time
 
-pnl_pct = (exit_price - entry_price) / entry_price if direction == 'Long' else (entry_price - exit_price) / entry_price
-notional = CAPITAL * LEVERAGE
-trade_pnl = notional * pnl_pct - notional * (SLIPPAGE + FEE)
-final_capital = CAPITAL + trade_pnl
+    # Lock until the trade exits
+    in_trade_until = i + exit_time
+
+    pnl_pct = (exit_price - entry_price) / entry_price if direction == 'Long' else (entry_price - exit_price) / entry_price
+    notional = capital_curve[-1] * LEVERAGE
+    trade_pnl = notional * pnl_pct - notional * (SLIPPAGE + FEE)
+    new_capital = max(0, capital_curve[-1] + trade_pnl)
+    capital_curve.append(new_capital)
+
+    trades.append({
+        'Entry_Time': df_test.index[i+1],
+        'Direction': direction,
+        'Entry': entry_price,
+        'Exit': exit_price,
+        'Exit_Time': df_test.index[exit_idx] if exit_time>0 else df_test.index[i],
+        'Result': result,
+        'Bars_Held': exit_time,
+        'Net_PnL': trade_pnl,
+        'Capital_After': new_capital,
+        'Confidence': conf
+    })
 
 # ==========================================
 # RESULTS
 # ==========================================
+if len(trades) == 0:
+    print(f"\n❌ No trades at threshold {CONFIDENCE_THRESHOLD}. Try lowering to 0.60 or 0.65.")
+    exit(0)
+
+df_trades = pd.DataFrame(trades)
+df_trades.to_csv("backtest_hourly_highconf.csv", index=False)
+
+total_trades = len(df_trades)
+wins = len(df_trades[df_trades['Result'] == 'Win'])
+losses = len(df_trades[df_trades['Result'] == 'Loss'])
+no_exit = len(df_trades[df_trades['Result'] == 'No Exit'])
+win_rate = wins / total_trades * 100 if total_trades > 0 else 0
+final_capital = capital_curve[-1]
+total_return = (final_capital - CAPITAL) / CAPITAL * 100
+avg_win = df_trades[df_trades['Net_PnL']>0]['Net_PnL'].mean() if wins > 0 else 0
+avg_loss = df_trades[df_trades['Net_PnL']<0]['Net_PnL'].mean() if losses > 0 else 0
+gross_wins = df_trades[df_trades['Net_PnL']>0]['Net_PnL'].sum()
+gross_losses = abs(df_trades[df_trades['Net_PnL']<0]['Net_PnL'].sum())
+profit_factor = gross_wins / gross_losses if gross_losses > 0 else np.inf
+peak = np.maximum.accumulate(capital_curve)
+drawdown = (peak - capital_curve) / peak * 100
+max_dd = drawdown.max()
+returns = np.diff(capital_curve) / capital_curve[:-1]
+sharpe = (np.mean(returns) / (np.std(returns) + 1e-9)) * np.sqrt(365 * 24)
+
 print("\n" + "="*60)
-print("📊 TOP 1 SIGNAL BACKTEST RESULT")
+print("📊 HOURLY HIGH‑CONFIDENCE BACKTEST RESULTS")
 print("="*60)
-print(f"📅 Entry: {df_test.index[i+1]}")
-print(f"📅 Exit : {df_test.index[exit_idx] if exit_time>0 else df_test.index[i]}")
-print(f"🎯 Direction: {direction}")
-print(f"📊 Confidence: {confidence*100:.2f}%")
-print(f"📈 Entry Price: {entry_price:.4f}")
-print(f"📉 Exit Price : {exit_price:.4f}")
-print(f"📊 Result: {result}")
-print(f"📊 Bars Held: {exit_time}")
-print(f"📊 PnL % (Leveraged): {pnl_pct*LEVERAGE*100:.2f}%")
-print(f"💵 Final Capital: ${final_capital:.2f} (Initial: ${CAPITAL})")
+print(f"📅 Period: {df_test.index[0].date()} to {df_test.index[-1].date()}")
+print(f"🎯 Confidence Threshold: {CONFIDENCE_THRESHOLD*100:.0f}%")
+print(f"💵 Initial Capital: ${CAPITAL}")
+print(f"📈 Final Capital  : ${final_capital:.2f}")
+print(f"📈 Total Return   : {total_return:.2f}%")
+print(f"📈 Sharpe Ratio   : {sharpe:.2f}")
+print(f"📈 Max Drawdown   : {max_dd:.2f}%")
+print("-" * 60)
+print(f"📊 Total Trades   : {total_trades}")
+print(f"📊 Wins           : {wins}")
+print(f"📊 Losses         : {losses}")
+print(f"📊 No Exit (flat) : {no_exit}")
+print(f"📊 Win Rate (%)   : {win_rate:.2f}%")
+print(f"📊 Avg Win ($)    : ${avg_win:.2f}" if wins>0 else "N/A")
+print(f"📊 Avg Loss ($)   : ${avg_loss:.2f}" if losses>0 else "N/A")
+print(f"📊 Profit Factor  : {profit_factor:.2f}")
 print("="*60)
-print("💾 Trade log saved to 'top1_signal_trade.csv'")
+
+longs = len(df_trades[df_trades['Direction']=='Long'])
+shorts = len(df_trades[df_trades['Direction']=='Short'])
+long_wins = len(df_trades[(df_trades['Direction']=='Long') & (df_trades['Result']=='Win')])
+short_wins = len(df_trades[(df_trades['Direction']=='Short') & (df_trades['Result']=='Win')])
+print(f"🔹 Long trades : {longs} (Win rate: {long_wins/max(1,longs)*100:.2f}%)")
+print(f"🔹 Short trades: {shorts} (Win rate: {short_wins/max(1,shorts)*100:.2f}%)")
+print("="*60)
+print("💾 Trade log saved to 'backtest_hourly_highconf.csv'")
