@@ -28,7 +28,7 @@ SPLIT_RATIO = 0.8
 MODEL_LONG = "xgboost_long.json"
 MODEL_SHORT = "xgboost_short.json"
 
-CONFIDENCE_THRESHOLD = 0.70  # Only trade when model is ≥75% sure
+CONFIDENCE_THRESHOLD = 0.80  # Only trade when model is ≥75% sure
 
 CAPITAL = 100
 LEVERAGE = 10
